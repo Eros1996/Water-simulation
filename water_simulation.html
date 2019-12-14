@@ -1,0 +1,572 @@
+<html>
+<head>
+<style>
+body{font-family: Arial; font-size: large;}
+</style>
+
+                                    <!-- SHADERS -->
+
+<script type="text/glsl" id="waterVertex">
+uniform mat4 projection;
+uniform mat4 model;
+uniform mat4 view;
+attribute vec3 vertexPos;
+
+varying vec2 textureCoords;
+varying vec4 clipSpace;
+
+uniform mat4 invView;
+varying vec3 fromFragmentToCamera;
+const float tiling = 2.0;
+
+void main() {
+    vec4 worldPosition = model * vec4( vertexPos.x, vertexPos.y, vertexPos.z , 1.0);
+
+    clipSpace = projection * view * worldPosition;
+    gl_Position = clipSpace;
+
+    textureCoords = vec2(vertexPos.x/2.0 + 0.5, vertexPos.y/2.0 + 0.5);
+		textureCoords = textureCoords * tiling;
+
+    fromFragmentToCamera = (invView*vec4(0.0, 0.0, 0.0, 1.0)).xyz - worldPosition.xyz;
+}
+</script>
+
+<script type="text/glsl" id="waterFragment">
+precision mediump float;
+varying vec2 textureCoords;
+varying vec4 clipSpace;
+varying vec3 fromFragmentToCamera;
+
+uniform sampler2D reflectionTexture;
+uniform sampler2D refractionTexture;
+uniform sampler2D dudvMap;
+uniform sampler2D normalMap;
+
+uniform float moveFactor;
+uniform float waterDistortionStrength;
+uniform float fresnel;
+uniform float reflectivity;
+
+const float shineDamper = 20.0;
+
+vec3 sunlightColor = vec3(1.0, 1.0, 1.0);
+vec3 sunlightDir = normalize(vec3(-2.0, -2.0, 3.0));
+
+vec4 shallowWaterColor =  vec4(0.0, 0.1, 0.3, 1.0);
+
+uniform vec2 pos[5];
+uniform float time;
+uniform float timeA[5];
+uniform float propa[5];
+
+void main(void)
+{
+	vec2 ndc = (clipSpace.xy / clipSpace.w) / 2.0 + 0.5;
+
+  vec2 distortedTexCoords = texture2D(dudvMap, vec2(textureCoords.x + moveFactor, textureCoords.y)).rg * 0.1;
+  distortedTexCoords = textureCoords + vec2(distortedTexCoords.x, distortedTexCoords.y + moveFactor);
+  vec2 totalDistortion = (texture2D(dudvMap, distortedTexCoords).rg * 2.0 - 1.0) * waterDistortionStrength;
+
+  float dista;
+
+  vec2 ndcA = ndc;
+  for(int i =0; i<5; i++){
+    if(timeA[i]<1000.0){
+      dista = distance(pos[i].xy, ndcA.xy);
+      if(dista<propa[i]){
+        float difX = ndc.x-pos[i].x;
+        float difY = ndc.y-pos[i].y;
+
+        float fact = 0.3*(dista/timeA[i])*cos(5.0*(3.1416/2.0)*(dista/0.09) - time);
+
+        ndcA.x -= fact*(difX/dista);
+        ndcA.y -= fact*(difY/dista);
+      }
+    }
+  }
+
+  vec2 refractTexCoords = vec2(ndcA.x, ndcA.y);
+	vec2 reflectTexCoords = vec2(ndcA.x, ndcA.y);
+
+  refractTexCoords += totalDistortion;
+  reflectTexCoords += totalDistortion;
+
+  vec4 refractColor = texture2D(refractionTexture, refractTexCoords);
+  vec4 reflectColor = texture2D(reflectionTexture, reflectTexCoords);
+
+  vec4 normalMapColor = texture2D(normalMap, distortedTexCoords);
+  vec3 normal = vec3(normalMapColor.r * 2.0 - 1.0, normalMapColor.b, normalMapColor.g * 2.0 - 1.0);
+  normal = normalize(normal);
+
+	vec3 toCamera = normalize(fromFragmentToCamera);
+	float refractiveFactor = dot(toCamera, normal);
+	refractiveFactor = pow(refractiveFactor, fresnel);
+
+  vec3 reflectedLight = reflect(sunlightDir, normal);
+  float specular = max(dot(reflectedLight, toCamera), 0.0);
+  specular = pow(specular, shineDamper);
+  vec3 specularHighlights = sunlightColor * specular * reflectivity;
+
+  gl_FragColor = mix(reflectColor, refractColor, refractiveFactor);
+	gl_FragColor = mix(gl_FragColor, shallowWaterColor, 0.3) + vec4(specularHighlights, 0.0);
+}
+</script>
+
+                                  <!-- JAVASCRIPT CODE -->
+
+<!-- include functions for setting matrices -->
+<script type="text/javascript" src="matrices.js"></script>
+
+<script type="text/javascript">
+
+/* Global variables */
+var time = 0;
+var indexLi = 1;
+
+var timeA = [0.01, 1500, 1500, 1500, 1500,
+            /*1500, 1500, 1500, 1500, 1500,
+            1500, 1500, 1500, 1500, 1500*/];
+
+var propa = [0.01, 1500, 1500, 1500, 1500,
+            /*1500, 1500, 1500, 1500, 1500,
+            1500, 1500, 1500, 1500, 1500*/];
+
+var posLi = [0.5, 0.5, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0,
+            /*0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0*/];
+
+var gl, the_canvas;
+
+var moveFactor_loc;
+var model_loc, view_loc, projection_loc, invView_loc;
+var dudvMap_loc, refractionTexture_loc, reflectionTexture_loc, normalMap_loc;
+var reflectivity_loc, fresnel_loc, waterDistortionStrength_loc;
+var loc0, loc1, loc2, loc3;
+
+var lastMousePosX, lastMousePosY;
+
+var second;
+var moveFactor = 0.0;
+
+var qcurr = identityQuat();
+var rotation = identityMatrix();
+var trackball = {
+	x0: 0.0,
+	x1: 0.0,
+	y0: 0.0,
+	y1: 0.0,
+	r: 1.5,
+	d: 10,
+	getView: function() {
+		var p0 =  [this.x0, this.y0, 0],
+			  p1 =  [this.x1, this.y1, 0],
+			  origin = [0, 0, -this.d];
+
+		var p0Signed = multScalarVector(Math.sqrt(Math.pow(this.r, 2) / (Math.pow(p0[0], 2) + Math.pow(p0[1], 2) + Math.pow(this.d, 2))), p0);
+		var p1Signed = multScalarVector(Math.sqrt(Math.pow(this.r, 2) / (Math.pow(p1[0], 2) + Math.pow(p1[1], 2) + Math.pow(this.d, 2))), p1);
+
+		var axis = crossProduct(subtract(p1, origin), subtract(p0, origin));
+		if (magnitudeVector(axis) != 0)
+		   	axis = normalize(axis);
+
+		var alpha = -magnitudeVector(subtract(p1Signed, p0Signed));
+
+		var qnew = axisAngle2Quat(axis, alpha);
+		qcurr = multQuat(qcurr, qnew);
+		rotation = quat2Matrix(qcurr);
+
+		var res = identityMatrix();
+	  var trans = translationMatrix(0, 0, -this.d);
+
+    res = multMatrix(res, trans);
+    res = multMatrix(res, rotation);
+
+		return res;
+	}
+};
+
+/* Initialization */
+function initWebGL() {
+	the_canvas = document.getElementById("aViewport");
+  the_canvas.onmousemove = QuatmouseMove;
+  the_canvas.onmousedown = QuatMouseDown;
+  the_canvas.onwheel = wheelScroll;
+
+	gl = the_canvas.getContext("webgl");
+}
+
+/* Rendering */
+function setTransformMatrix(now){
+  var model = scalingMatrix(3.0, 2.0, 1.5);
+
+  var view = trackball.getView();
+
+  var aspectRatio = 1300.0 / 700.0 ;
+  var projection = perspectiveMatrixFOV(30, aspectRatio, 1.0, 50.0);
+
+	gl.uniformMatrix4fv( model_loc , false, new Float32Array(model) );
+	gl.uniformMatrix4fv( view_loc , false, new Float32Array(view) );
+	gl.uniformMatrix4fv( projection_loc , false, new Float32Array(projection) );
+  gl.uniformMatrix4fv( invView_loc , false, new Float32Array(invMatrix4(view)) );
+
+  var reflectivity = document.getElementById("reflectivity");
+  	gl.uniform1f(reflectivity_loc, reflectivity.value/10);
+
+  var fresnel = document.getElementById("fresnel");
+    gl.uniform1f(fresnel_loc, fresnel.value/2);
+
+  var waterDistortionStrength = document.getElementById("waterDistortionStrength");
+    gl.uniform1f(waterDistortionStrength_loc, waterDistortionStrength.value/100);
+
+  var waveSpeed = document.getElementById("waveSpeed").value/100;
+  moveFactor = (waveSpeed*second) % 1.0;
+	gl.uniform1f(moveFactor_loc, moveFactor);
+
+  gl.uniform1i(refractionTexture_loc, 0);
+  gl.uniform1i(reflectionTexture_loc, 1)
+  gl.uniform1i(dudvMap_loc, 2);
+  gl.uniform1i(normalMap_loc, 3);
+
+  for (var i = 0; i < 5; i++) {
+        if(timeA[i]<1000){
+            timeA[i] += 0.1+(timeA[i]/250);
+            propa[i] += 0.005;
+        }
+    }
+
+    gl.uniform2fv(loc0, posLi);
+    gl.uniform1f(loc1,  time/3);
+    gl.uniform1fv(loc2, timeA);
+    gl.uniform1fv(loc3, propa);
+}
+
+function setUniforms(){
+	 setTransformMatrix();
+}
+
+function doTheRendering(now){
+  second = now * 0.001;
+  time++;
+
+  gl.clearColor( 0.53, 0.8, 0.98, 1.0 );
+	gl.clear( gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT );
+
+	setUniforms();
+
+	gl.drawElements( gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0 );
+	requestAnimationFrame(doTheRendering);
+}
+
+/* Set up what to draw */
+function setupVertexArrayBuffer(){
+	var javascriptArray = [
+		-1.0,   1.0,  -1.0,
+     1.0,   1.0,  -1.0,
+     1.0,  -1.0,   1.0,
+    -1.0,  -1.0,   1.0,
+	];
+
+	var array = new Float32Array( javascriptArray );
+	var bufferId  = gl.createBuffer() ;
+	gl.bindBuffer( gl.ARRAY_BUFFER , bufferId );
+	gl.bufferData( gl.ARRAY_BUFFER, array , gl.STATIC_DRAW );
+
+	var triArrayJS = [
+	   0, 1, 2,
+	   0, 2, 3,
+	];
+
+	var triArray = new Uint16Array( triArrayJS );
+	var elementBufferId  = gl.createBuffer() ;
+	gl.bindBuffer( gl.ELEMENT_ARRAY_BUFFER , elementBufferId );
+	gl.bufferData( gl.ELEMENT_ARRAY_BUFFER, triArray , gl.STATIC_DRAW );
+
+	var dudvMap = gl.createTexture();
+	gl.activeTexture(gl.TEXTURE2);
+  gl.bindTexture(gl.TEXTURE_2D, dudvMap);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA,gl.UNSIGNED_BYTE,document.getElementById('waterDUDV'));
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+	var normalMap = gl.createTexture();
+	gl.activeTexture(gl.TEXTURE3);
+  gl.bindTexture(gl.TEXTURE_2D, normalMap);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA,gl.UNSIGNED_BYTE,document.getElementById('normal'));
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+	var refractionTexture = gl.createTexture();
+	gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, refractionTexture);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA,gl.UNSIGNED_BYTE,document.getElementById('refraction'));
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+	var reflectionTexture = gl.createTexture();
+	gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, reflectionTexture);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA,gl.UNSIGNED_BYTE,document.getElementById('reflection'));
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+}
+
+/* Set up how to draw */
+function setupVertexPuller(){
+  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 3*4, 0);
+  gl.enableVertexAttribArray( 0 );
+}
+
+function setupShaders(){
+	var vertShaderId = gl.createShader( gl.VERTEX_SHADER );
+	var vertShaderSource = document.getElementById("waterVertex").textContent;
+	gl.shaderSource( vertShaderId, vertShaderSource);
+	gl.compileShader( vertShaderId );
+	var compiledV = gl.getShaderParameter(vertShaderId, gl.COMPILE_STATUS);
+	console.log('Vertex shader compiled successfully: ' + compiledV);
+  if (!compiledV) {
+	   var compilationLog = gl.getShaderInfoLog(vertShaderId);
+	   console.log('Shader compiler log: \n' + compilationLog);
+  }
+
+	var fragShaderId = gl.createShader( gl.FRAGMENT_SHADER );
+	var fragShaderSource = document.getElementById("waterFragment").textContent;
+	gl.shaderSource( fragShaderId, fragShaderSource);
+	gl.compileShader( fragShaderId );
+	var compiledF = gl.getShaderParameter(fragShaderId, gl.COMPILE_STATUS);
+	console.log('Frag shader compiled successfully: ' + compiledF);
+  if (!compiledF) {
+	   var compilationLog = gl.getShaderInfoLog(fragShaderId);
+	   console.log('Shader compiler log: \n' + compilationLog);
+  }
+
+	var programId = gl.createProgram();
+	gl.attachShader( programId, vertShaderId );
+	gl.attachShader( programId, fragShaderId );
+	gl.bindAttribLocation( programId, 0, "vertexPos" );
+
+	gl.linkProgram( programId );
+
+	model_loc = gl.getUniformLocation( programId, "model" );
+	view_loc = gl.getUniformLocation( programId, "view" );
+	projection_loc = gl.getUniformLocation( programId, "projection" );
+  invView_loc = gl.getUniformLocation( programId, "invView" );
+
+	moveFactor_loc = gl.getUniformLocation( programId, "moveFactor" );
+  reflectivity_loc = gl.getUniformLocation( programId, "reflectivity" );
+  fresnel_loc = gl.getUniformLocation( programId, "fresnel" );
+  waterDistortionStrength_loc = gl.getUniformLocation( programId, "waterDistortionStrength" );
+
+  refractionTexture_loc = gl.getUniformLocation( programId, "refractionTexture" );
+  reflectionTexture_loc = gl.getUniformLocation( programId, "reflectionTexture" );
+  dudvMap_loc = gl.getUniformLocation( programId, "dudvMap" );
+  normalMap_loc = gl.getUniformLocation( programId, "normalMap" );
+
+  loc0 = gl.getUniformLocation( programId, "pos" );
+  loc1 = gl.getUniformLocation( programId, "time" );
+  loc2 = gl.getUniformLocation( programId, "timeA" );
+  loc3 = gl.getUniformLocation( programId, "propa" );
+
+	gl.useProgram( programId );
+}
+
+function resetView() {
+	trackball.d = 10;
+	trackball.x0 = 0.0;
+	trackball.y0 = 0.0;
+	trackball.x1 = 0.0;
+	trackball.y1 = 0.0;
+
+	rotation = identityMatrix();
+	qcurr = identityQuat();
+}
+
+/* Callbacks */
+function QuatMouseDown( event ) {
+  event.preventDefault();
+
+  var rect = the_canvas.getBoundingClientRect();
+
+  lastMousePosX = (event.clientX - rect.left) / 1300 *  2 - 1;
+  lastMousePosY = (event.clientY - rect.top) / 700 * -2 + 1;
+
+  the_canvas.onmouseup = myMouseUp;
+}
+
+function QuatmouseMove(event) {
+	if(event.buttons == 0) return;
+
+  trackball.x0 = lastMousePosX;
+  trackball.y0 = lastMousePosY;
+
+  if(event.buttons == 1) {
+    var rect = the_canvas.getBoundingClientRect();
+
+    lastMousePosX = (event.clientX - rect.left) / 1300 *  2 - 1;
+    lastMousePosY = (event.clientY - rect.top) / 700 * -2 + 1;
+
+  	trackball.x1 = lastMousePosX;
+  	trackball.y1 = lastMousePosY;
+  }
+
+  the_canvas.onmouseup = stop;
+  window.onmouseup = stop;
+}
+
+function stop(event) {
+  trackball.x0 = 0.0;
+  trackball.y0 = 0.0;
+  trackball.x1 = 0.0;
+  trackball.y1 = 0.0;
+}
+
+function myMouseUp(event){
+  event.preventDefault();
+
+  texturePosX = lastMousePosX/2.0 + 0.5;
+  texturePosY = lastMousePosY/2.0 + 0.5;
+                          //rough way to limit the clickable area to create waves
+  if(timeA[indexLi]>50 && texturePosX >= 0.15 && texturePosX <= 0.85 && texturePosY>=0.05 && texturePosY<=0.85){
+      posLi[indexLi*2+0] = texturePosX;
+      posLi[indexLi*2+1] = texturePosY;
+      timeA[indexLi] = 0.01;
+      propa[indexLi] = 0.01;
+      indexLi++;
+      if(indexLi===5){
+          indexLi = 0;
+      }
+  }
+}
+
+function wheelScroll(event) {
+  event.preventDefault();
+	trackball.d = trackball.d + event.deltaY/150;
+}
+
+function main(){
+	initWebGL();
+	setupVertexArrayBuffer();
+	setupVertexPuller();
+	setupShaders();
+	requestAnimationFrame(doTheRendering);
+}
+
+window.onload = main;
+</script>
+
+<style>
+.b{
+  position: absolute;
+  left: 1350px;
+  top: 400px;
+  background-color: #86CCF9;
+  padding: 15px 22px;
+  font-size: 15px;
+}
+
+.info{
+  position: absolute;
+  left: 1350px;
+  top: 450px;
+}
+
+.slidecontainer {
+  position: absolute;
+  left: 1350px;
+  top: 70px;
+}
+
+.slider {
+  -webkit-appearance: none;
+  width: 100%;
+  height: 15px;
+  border-radius: 5px;
+  background: #d3d3d3;
+  outline: none;
+  opacity: 0.7;
+  -webkit-transition: .2s;
+  transition: opacity .2s;
+}
+
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 25px;
+  height: 25px;
+  border-radius: 50%;
+  background: #86CCF9;
+  cursor: pointer;
+}
+
+.slider::-moz-range-thumb {
+  width: 25px;
+  height: 25px;
+  border-radius: 50%;
+  background: #86CCF9;
+  cursor: pointer;
+}
+
+.title{
+  text-align:center;
+  font-size: 100%;
+}
+</style>
+
+</head>
+<body>
+
+  <div class="title"> <b>COMPUTER GRAPHICS AND AUGMENTED REALITY PROJECT:</b> Water Simulation
+    <p> <b>Name:</b> Eros, <b>Surname:</b> Viola, <b>uID:</b> 4219790, <b>e-mail:</b> eroseros96@gmail.com </p>
+  </div>
+
+<canvas
+   id="aViewport"
+   width=1300 height=700
+   style="border: 0px solid blue;" >
+</canvas>
+
+<div class="slidecontainer">
+  <p>Reflectivity: </p>
+    <input type="range" min="0" max="20"  value="10" class="slider"  id="reflectivity">
+
+  <p>Fresnel: </p>
+    <input type="range" min="0" max="20" value="1" class="slider" id="fresnel">
+
+  <p>WaveSpeed: </p>
+    <input type="range" min="0" max="15" value="5" class="slider" id="waveSpeed">
+
+  <p>WaterDistortionStrength: </p>
+    <input type="range" min="0" max="20" value="2" class="slider"  id="waterDistortionStrength">
+</div>
+
+<button class="b" type="button" onclick="resetView()" id="reset">Reset view</button>
+
+<div class="info">
+  <p>Implementation: <ul>
+      <li>rotation with quaternions</li>
+      <li>specular lights (reflectivity)</li>
+      <li>refraction and reflection effect (fresnel)</li>
+      <li>rippling effect (waveSpeed + waterDistortionStrength)</li>
+  </ul></p>
+  <p>Interactions: <ul>
+      <li>left button: rotate</li>
+      <li>wheel: zoom in / out</li>
+      <li>generates waves on click</li>
+      <li>button + slider</li>
+  </ul></p>
+</div>
+
+<img id="reflection" src="texture/reflection.jpg" width="0" height="0">
+<img id="refraction" src="texture/refraction.jpg" width="0" height="0">
+<img id="waterDUDV" src="texture/waterDUDV.png" width="0" height="0">
+<img id="normal" src="texture/normal.png" width="0" height="0">
+
+</body>
+</html>
